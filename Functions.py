@@ -3,6 +3,32 @@ import torch.nn as nn
 import math
 
 
+def rotate_half(x):
+    x1 = x[..., 0::2]
+    x2 = x[..., 1::2]
+    
+    return torch.stack((-x2, x1), dim=-1).flatten(-2)
+    
+def apply_RoPE(q, k):
+    B, H, T, D = q.shape
+    
+    freqs = torch.arange(0,D,2).float()
+    freqs = 1.0/(500000**(freqs/D))
+    
+    pos = torch.arange(T).float()
+    
+    angles = pos[:, None]*freqs[None, :]
+    
+    sine = torch.sin(angles)
+    cosine = torch.cos(angles)
+    
+    sine = sine[None, None, :, :]
+    cosine = cosine[None, None, :, :]
+    
+    q = (q * cosine.repeat_interleave(2, dim=-1)) + (rotate_half(q)*sine.repeat_interleave(2, dim=-1))
+    k = (k * cosine.repeat_interleave(2, dim=-1)) + (rotate_half(k)*sine.repeat_interleave(2, dim=-1))
+    
+    return q, k
 
 #---------------RMSNorm-------------------#
 class RMSNorm(nn.Module):
@@ -39,7 +65,13 @@ class SelfAttention(nn.Module):
         K = K.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)        
         
-        scores = (q @ k.transpose(-2, -1))/math.sqrt(self.head_dim)                         #score calculation
+        Q, K = apply_RoPE(Q, K)
+        
+        scores = (Q @ K.transpose(-2, -1))/math.sqrt(self.head_dim)                         #score calculation
+        mask = torch.tril(torch.ones(T,T))
+        mask =  mask.unsqueeze(0).unsqueeze(0)
+        scores = scores.masked_fill( mask == 0, float('-inf'))
+        
         weights = torch.softmax(scores, dim =-1)
         out = weights @ V                                                       #weighted sum
         
@@ -55,7 +87,7 @@ class FFN(nn.Module):
         self.w_down = nn.Linear(hidden_dim, dim, bias = False)
         self.w_gate = nn.Linear(dim, hidden_dim, bias = False)
         
-    def forward(self,x):
+    def forward(self, x):
         return self.w_down(torch.nn.functional.silu(self.w_up(x))*self.w_gate(x))                        #silu is x*sigmoid(x)
 
 class TransformerBlock(nn.Module):
