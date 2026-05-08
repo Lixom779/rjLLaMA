@@ -9,13 +9,13 @@ def rotate_half(x):
     
     return torch.stack((-x2, x1), dim=-1).flatten(-2)
     
-def apply_RoPE(q, k):
+def apply_RoPE(q, k, start_pos):
     B, H, T, D = q.shape
     
     freqs = torch.arange(0,D,2).float()
     freqs = 1.0/(500000**(freqs/D))
     
-    pos = torch.arange(T).float()
+    pos = torch.arange(start_pos, start_pos + T).float()
     
     angles = pos[:, None]*freqs[None, :]
     
@@ -43,7 +43,7 @@ class RMSNorm(nn.Module):
         return self.weight * x
         
 #--------------Attention-------------------#
-class SelfAttention(nn.Module):
+class Attention(nn.Module):
     def __init__(self, dim, n_heads):
         super().__init__()
         self.n_heads = n_heads
@@ -53,7 +53,7 @@ class SelfAttention(nn.Module):
         self.wv = nn.Linear(dim, dim, bias=False)
         self.wo = nn.Linear(dim, dim, bias=False)
         
-    def forward(self, x):
+    def forward(self, x, K_cache = None, V_cache = None):
         
         B, T, C = x.shape
         
@@ -65,19 +65,26 @@ class SelfAttention(nn.Module):
         K = K.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)        
         
-        Q, K = apply_RoPE(Q, K)
+        start_pos = K_cache.shape[2] if K_cache is not None else 0
+        Q, K = apply_RoPE(Q, K, start_pos)
+        
+        if K_cache is not None:
+            K = torch.cat([K_cache, K], dim=2)
+            V = torch.cat([V_cache, V], dim=2)
         
         scores = (Q @ K.transpose(-2, -1))/math.sqrt(self.head_dim)                         #score calculation
-        mask = torch.tril(torch.ones(T,T))
-        mask =  mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill( mask == 0, float('-inf'))
+        
+        if K_cache is None:
+            mask = torch.tril(torch.ones(T, T))
+            mask =  mask.unsqueeze(0).unsqueeze(0)
+            scores = scores.masked_fill( mask == 0, float('-inf'))
         
         weights = torch.softmax(scores, dim =-1)
         out = weights @ V                                                       #weighted sum
         
-        out = out.transpose(1, 2).contiguous().view(B, T, C)                       #merging heads
+        out = out.transpose(1,2).contiguous().view(B, T, C)                       #merging heads
         
-        return self.wo(out)
+        return self.wo(out), K, V
         
 #--------------MLP(with SwiGLU)-------------#
 class FFN(nn.Module):
@@ -95,18 +102,19 @@ class TransformerBlock(nn.Module):
         super().__init__()
         
         self.attn_norm = RMSNorm(dim)
-        self.attn = SelfAttention(dim, n_heads)
+        self.attn = Attention(dim, n_heads)
         
         self.ffn_norm = RMSNorm(dim)
         self.ffn = FFN(dim, hidden_dim)
        
-    def forward(self, x):
+    def forward(self, x, kcache = None, vcache = None):
+        attn_output, new_kcache, new_vcache = self.attn(self.attn_norm(x), kcache, vcache)
         
-        x = x + self.attn(self.attn_norm(x))
+        x = x + attn_output
         
         x = x + self.ffn(self.ffn_norm(x))
         
-        return x
+        return x, new_kcache, new_vcache
         
 class MiniLlama(nn.Module):
     def __init__(self, vocab_size, dim, n_layers, n_heads, hidden_dim):
@@ -122,11 +130,21 @@ class MiniLlama(nn.Module):
         self.norm = RMSNorm(dim)
         self.lm_head = nn.Linear(dim, vocab_size, bias=False)
 
-    def forward(self, input_ids):
+    def forward(self, input_ids, kv_cache = None):
         x = self.embed(input_ids)
+        
+        new_kv_cache = []
 
-        for layer in self.layers:
-            x = layer(x)
+        for i,layer in enumerate(self.layers):
+            k_temp = None
+            v_temp = None
+            
+            if kv_cache is not None:
+                k_temp, v_temp = kv_cache[i]
+            
+            x, new_k, new_v = layer(x, k_temp, v_temp)
+            new_kv_cache.append((new_k, new_v))
 
         x = self.norm(x)
-        return self.lm_head(x)
+        logits = self.lm_head(x)
+        return logits, new_kv_cache
