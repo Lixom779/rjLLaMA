@@ -75,21 +75,13 @@ def generate(model, input_ids, stop_tokens, max_tokens = 200):
     
     return torch.cat(generated, dim=1)
     
+with open("config.json", "r") as f:
+        cfg = json.load(f)
     
-    
-scale_RoPE = {
-    "factor": 8.0,
-    "low_freq_factor": 1.0,
-    "high_freq_factor": 4.0,
-    "original_max_position_embeddings": 8192
-}
-stop_tokens =[
-    128001,
-    128008,
-    128009
-]
 
-model = MiniLlama(vocab_size=128256, dim=4096, n_layers=32, n_heads=32, n_kv_heads=8, RoPE_scaling = scale_RoPE, hidden_dim=14336)
+stop_tokens = cfg["eos_token_id"]
+
+model = MiniLlama(vocab_size=cfg["vocab_size"], dim=cfg["hidden_size"], n_layers=cfg["num_hidden_layers"], n_heads=cfg["num_attention_heads"], n_kv_heads=cfg["num_key_value_heads"], RoPE_scaling = cfg.get("rope_scaling",None), hidden_dim=cfg["intermediate_size"], RoPE_theta=cfg["rope_theta"])
 
 weights = load_weights("D:/Bhanu/AI/Transformers/Buliding files for llama/Llama_weights_and_tokenizer/Llama3.18B_instruct/")
 

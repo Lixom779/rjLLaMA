@@ -11,7 +11,7 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-def apply_RoPE(q, k, start_pos, RoPE_theta=500000.0, RoPE_scaling=None):
+def apply_RoPE(q, k, start_pos, RoPE_theta=None, RoPE_scaling=None):
     B, H, T, D = q.shape
     device, dtype = q.device, q.dtype
 
@@ -66,11 +66,12 @@ class RMSNorm(nn.Module):
         
 #--------------Attention-------------------#
 class Attention(nn.Module):
-    def __init__(self, dim, n_heads, n_kv_heads, RoPE_scaling):
+    def __init__(self, dim, n_heads, n_kv_heads, RoPE_scaling, RoPE_theta):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.RoPE_scaling = RoPE_scaling
+        self.RoPE_theta = RoPE_theta
         self.head_dim = dim // n_heads
         self.n_rep = n_heads // n_kv_heads
         
@@ -91,7 +92,7 @@ class Attention(nn.Module):
         K = K.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         V = V.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)        
         
-        Q, K = apply_RoPE(Q, K, start_pos, RoPE_theta = 500000, RoPE_scaling = self.RoPE_scaling)
+        Q, K = apply_RoPE(Q, K, start_pos, RoPE_theta = self.RoPE_theta, RoPE_scaling = self.RoPE_scaling)
         
         if K_cache is not None:
             K = torch.cat([K_cache, K], dim=2)
@@ -126,11 +127,11 @@ class FFN(nn.Module):
         return self.w_down(torch.nn.functional.silu(self.w_gate(x))*self.w_up(x))                        #silu is x*sigmoid(x)
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, n_kv_heads, RoPE_scaling, hidden_dim):
+    def __init__(self, dim, n_heads, n_kv_heads, RoPE_scaling, hidden_dim, RoPE_theta):
         super().__init__()
         
         self.attn_norm = RMSNorm(dim)
-        self.attn = Attention(dim, n_heads, n_kv_heads, RoPE_scaling)
+        self.attn = Attention(dim, n_heads, n_kv_heads, RoPE_scaling, RoPE_theta)
         
         self.ffn_norm = RMSNorm(dim)
         self.ffn = FFN(dim, hidden_dim)
@@ -145,13 +146,13 @@ class TransformerBlock(nn.Module):
         return x, new_kcache, new_vcache
         
 class MiniLlama(nn.Module):
-    def __init__(self, vocab_size, dim, n_layers, n_heads, n_kv_heads, RoPE_scaling, hidden_dim):
+    def __init__(self, vocab_size, dim, n_layers, n_heads, n_kv_heads, RoPE_scaling, hidden_dim, RoPE_theta):
         super().__init__()
 
         self.embed = nn.Embedding(vocab_size, dim)
 
         self.layers = nn.ModuleList([
-            TransformerBlock(dim, n_heads, n_kv_heads, RoPE_scaling, hidden_dim)
+            TransformerBlock(dim, n_heads, n_kv_heads, RoPE_scaling, hidden_dim, RoPE_theta)
             for _ in range(n_layers)
         ])
 
